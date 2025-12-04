@@ -56,29 +56,84 @@ export const useGameEngine = () => {
       
       const effectiveDemand = Math.floor(baseDemand * seasonality);
 
+      // Gate Availability Logic
+      const hasTerminalExp = stateRef.current.upgrades.some(u => u.id === 'terminal_exp_1' && u.unlocked);
+      const totalGates = hasTerminalExp ? 4 : 3;
+      // Estimate time a plane occupies a slot (Approach + Taxi + Park + Taxi Out)
+      // Park is 300. Taxiing is approx 100 total. Buffer included.
+      const GATE_OCCUPANCY_WINDOW = 450; 
+
+      // Get existing future commitments
+      // We check against scheduled flights that haven't landed yet, AND planes currently active that will be at gates
+      // Simplified: Just check the 'Schedule' for future overlap.
+      const existingFlights = stateRef.current.schedule.filter(s => 
+          s.status === 'Scheduled' && s.scheduledTime > currentTime
+      );
+      
+      let committedIntervals = existingFlights.map(f => ({ 
+          start: f.scheduledTime, 
+          end: f.scheduledTime + GATE_OCCUPANCY_WINDOW 
+      }));
+
       // Generate flights for the next 6 hours (360 ticks)
       const futureFlights: ScheduledFlight[] = [];
       const numFlights = Math.max(1, Math.ceil(effectiveDemand / 12)); 
       
       for (let i = 0; i < numFlights; i++) {
-          const airline = AIRLINES[Math.floor(Math.random() * AIRLINES.length)];
-          const isArrival = true; 
-          // Schedule 1 to 6 hours in future
-          const scheduledTime = currentTime + Math.floor(Math.random() * 360) + 60; 
-          
-          let type: any = 'regional';
-          if (effectiveDemand > 50 && Math.random() > 0.5) type = 'narrowbody';
-          if (effectiveDemand > 80 && Math.random() > 0.8) type = 'widebody';
+          let attempts = 0;
+          let scheduled = false;
 
-          futureFlights.push({
-              id: uuidv4(),
-              airline: airline.name,
-              flightNumber: `${airline.code}${Math.floor(Math.random() * 900) + 100}`,
-              type,
-              scheduledTime,
-              isArrival,
-              status: 'Scheduled'
-          });
+          while (attempts < 15 && !scheduled) {
+              // Schedule 1 to 6 hours in future
+              const scheduledTime = currentTime + Math.floor(Math.random() * 360) + 60; 
+              const candidateEnd = scheduledTime + GATE_OCCUPANCY_WINDOW;
+
+              // Collision Detection: Max Concurrency
+              // Filter relevant intervals that overlap with candidate
+              const relevant = [ ...committedIntervals, { start: scheduledTime, end: candidateEnd } ].filter(iv => 
+                  iv.start < candidateEnd && iv.end > scheduledTime
+              );
+
+              // Sweep Line to find max concurrency in this window
+              const points: {t: number, type: number}[] = [];
+              relevant.forEach(iv => {
+                  points.push({ t: iv.start, type: 1 });
+                  points.push({ t: iv.end, type: -1 });
+              });
+              
+              // Sort by time. If equal, process END (-1) before START (1) to allow tight packing (no overlap on exact edge)
+              points.sort((a, b) => a.t - b.t || a.type - b.type);
+
+              let maxConcurrent = 0;
+              let currentConcurrent = 0;
+              for (const p of points) {
+                  currentConcurrent += p.type;
+                  maxConcurrent = Math.max(maxConcurrent, currentConcurrent);
+              }
+
+              if (maxConcurrent <= totalGates) {
+                  // Valid Slot Found
+                  const airline = AIRLINES[Math.floor(Math.random() * AIRLINES.length)];
+                  let type: any = 'regional';
+                  if (effectiveDemand > 50 && Math.random() > 0.5) type = 'narrowbody';
+                  if (effectiveDemand > 80 && Math.random() > 0.8) type = 'widebody';
+
+                  const newFlight: ScheduledFlight = {
+                      id: uuidv4(),
+                      airline: airline.name,
+                      flightNumber: `${airline.code}${Math.floor(Math.random() * 900) + 100}`,
+                      type,
+                      scheduledTime,
+                      isArrival: true,
+                      status: 'Scheduled'
+                  };
+
+                  futureFlights.push(newFlight);
+                  committedIntervals.push({ start: scheduledTime, end: candidateEnd });
+                  scheduled = true;
+              }
+              attempts++;
+          }
       }
       return futureFlights.sort((a,b) => a.scheduledTime - b.scheduledTime);
   }, []);
@@ -88,8 +143,7 @@ export const useGameEngine = () => {
   const createPlane = (flight: ScheduledFlight): Plane => {
     const startPos = { x: -600, y: 750, heading: 90 };
     const initialWaypoints = [
-        { x: 500, y: 750, heading: 90 }, // Threshold
-        { x: 1500, y: 750, heading: 90 } // Rollout end
+        { x: 500, y: 750, heading: 90 }, // Threshold only (triggers LANDING state)
     ];
 
     return {
@@ -201,6 +255,7 @@ export const useGameEngine = () => {
     if (updated.status === PlaneStatus.TAXI_IN || updated.status === PlaneStatus.TAXI_OUT) speed *= 0.5;
     if (updated.status === PlaneStatus.PARKED || updated.status === PlaneStatus.WAITING_FOR_GATE) speed = 0;
     if (updated.status === PlaneStatus.TAKEOFF) speed *= 3;
+    if (updated.status === PlaneStatus.LANDING) speed *= 2.5;
     
     const moveSpeed = speed * SPEED_FACTOR; // Fixed speed
 
@@ -214,9 +269,14 @@ export const useGameEngine = () => {
     // State Transitions
     if (updated.waypoints.length === 0) {
         switch (updated.status) {
+            case PlaneStatus.APPROACH:
+                updated.status = PlaneStatus.LANDING;
+                updated.waypoints = [{ x: 1300, y: 750, heading: 90 }]; // Rollout to high-speed exit
+                break;
+
             case PlaneStatus.LANDING:
                 updated.status = PlaneStatus.TAXI_IN;
-                // Move to taxi intersection (end of high speed exit)
+                // Move to taxi intersection (apron entry)
                 updated.waypoints = [{ x: 1300, y: 850, heading: 180 }];
                 break;
             
@@ -317,11 +377,9 @@ export const useGameEngine = () => {
             });
 
             // 4. Update Occupancy Map
-            // We use a "working" occupancy map that updates as we process planes to prevent collisions in the same tick
             const occupancy: Record<string, string|null> = { ...current.gateOccupancy };
             Object.keys(occupancy).forEach(k => occupancy[k] = null);
             
-            // Pre-fill with existing known occupancy
             current.planes.forEach(p => {
                 if (p.targetGateId && (p.status === PlaneStatus.TAXI_IN || p.status === PlaneStatus.PARKED || p.status === PlaneStatus.WAITING_FOR_GATE)) {
                     occupancy[p.targetGateId] = p.id;

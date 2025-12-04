@@ -6,8 +6,6 @@ A procedural, AI-enhanced airport simulation game built with React, Tailwind CSS
 
 Manage a growing regional airport, expanding it into an international hub. The game runs on a simulated clock with seasonal traffic fluctuations, day/night cycles, and real-time physics for aircraft ground movement.
 
-<img width="1000" height="500" alt="Screenshot 2025-12-04 130121" src="https://github.com/user-attachments/assets/27e1dca2-65ef-421d-b606-a47e8c24af28" />
-
 ### Key Features
 *   **Procedural Schedules:** Flight schedules are generated dynamically based on airport demand and seasonality.
 *   **Realistic Ground Ops:** Planes land, taxi, park at specific gates, push back, and take off using pathfinding logic.
