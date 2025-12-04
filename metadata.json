@@ -1,0 +1,5 @@
+{
+  "name": "SkyHarbor Tycoon AI",
+  "description": "A procedural airport simulation game where you manage a growing regional airport, negotiate with airlines using AI, and influence the local economy.",
+  "requestFramePermissions": []
+}
